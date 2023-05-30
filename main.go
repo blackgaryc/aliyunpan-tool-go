@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"container/list"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -22,8 +26,26 @@ var totalFile int64 = 0
 
 func main() {
 	panClient, ui := doLogin()
-	finfo, errFinfo := panClient.FileInfoByPath(ui.FileDriveId, "/export008")
-	fmt.Println(finfo, errFinfo)
+	finfo, errFinfo := panClient.FileInfoByPath(ui.FileDriveId, os.Args[1])
+	if errFinfo != nil {
+		log.Fatalln(errFinfo)
+		fmt.Println(finfo, errFinfo)
+	}
+	dataFile, _ := os.OpenFile("data_"+finfo.FileName+".json", os.O_CREATE|os.O_RDWR, 0644)
+	//process data last requested
+	fileScanner := bufio.NewScanner(dataFile)
+	fileScanner.Split(bufio.ScanLines)
+	filelist := list.New().Init()
+	for fileScanner.Scan() {
+		line := fileScanner.Text()
+		file := &aliyunpan.FileEntity{}
+		err := json.Unmarshal([]byte(line), file)
+		if err != nil {
+			fmt.Println(err)
+		}
+		filelist.PushBack(*file)
+	}
+
 	listparam := &aliyunpan.FileListParam{}
 	listparam.DriveId = ui.FileDriveId
 	listparam.ParentFileId = finfo.FileId
@@ -32,7 +54,7 @@ func main() {
 		fmt.Println(fl, errListGetAll)
 		return
 	}
-	dataFile, _ := os.OpenFile("data_"+finfo.FileName+".json", os.O_CREATE|os.O_RDWR, 0755)
+
 	numFile, numDir := fl.Count()
 	totalFile += numFile
 	fmt.Fprintln(os.Stdout, "totalFile:\t\t", totalFile)
@@ -40,7 +62,7 @@ func main() {
 		file := fl.Item(i)
 		fmt.Println(file.FileName)
 		jsonhelper.MarshalData(dataFile, file)
-		if file.FileType == "folder" {
+		if file.FileType == "folder" && !isNotLastFolder(filelist, file) {
 			time.Sleep(1 * time.Second)
 			ListSubDir(panClient, ui, file, dataFile)
 		}
@@ -53,6 +75,8 @@ func ListSubDir(panclient *aliyunpan.PanClient, userinfo *aliyunpan.UserInfo, pf
 	fl, errListGetAll := panclient.FileListGetAll(listparam, 1200)
 	if nil != errListGetAll {
 		fmt.Println(fl, errListGetAll)
+		panclient, userinfo = doLogin()
+		fl, _ = panclient.FileListGetAll(listparam, 1200)
 	}
 	numFile, numDir := fl.Count()
 	totalFile += numFile
@@ -101,7 +125,7 @@ func doLogin() (*aliyunpan.PanClient, *aliyunpan.UserInfo) {
 	configFile, err := os.OpenFile("config.json", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		fmt.Println("read user info error")
-		return nil, nil
+		// return nil, nil
 	}
 	defer configFile.Close()
 
@@ -121,7 +145,7 @@ func doLogin() (*aliyunpan.PanClient, *aliyunpan.UserInfo) {
 			return nil, nil
 		}
 		localconfig.WebToken = *tmpWebToken
-		jsonhelper.MarshalData(configFile, localconfig)
+		// jsonhelper.MarshalData(configFile, localconfig)
 	}
 
 	appConfig := aliyunpan.AppConfig{
@@ -151,4 +175,43 @@ func doLogin() (*aliyunpan.PanClient, *aliyunpan.UserInfo) {
 		return nil, nil
 	}
 	return panClient, ui
+}
+
+func isNotLastFolder(li *list.List, file *aliyunpan.FileEntity) bool {
+
+	var lastFolder aliyunpan.FileEntity
+	for e := li.Back(); e != nil; e = e.Prev() {
+		item := aliyunpan.FileEntity(e.Value.(aliyunpan.FileEntity))
+		if item.FileType == "folder" {
+			lastFolder = item
+			break
+		}
+	}
+	if lastFolder.FileId == file.FileId {
+		return true
+	}
+	for {
+		parentFloder, msg := getParentFile(li, &lastFolder)
+		if msg != "" {
+			break
+		}
+		if parentFloder.FileId == file.FileId {
+			return true
+		}
+		lastFolder = *parentFloder
+	}
+	return false
+}
+
+func getParentFile(li *list.List, file *aliyunpan.FileEntity) (*aliyunpan.FileEntity, string) {
+	var lastFolder aliyunpan.FileEntity
+	for e := li.Back(); e != nil; e = e.Prev() {
+		item := aliyunpan.FileEntity(e.Value.(aliyunpan.FileEntity))
+		if item.FileType == "folder" && item.FileId == file.ParentFileId {
+			lastFolder = item
+			fmt.Println(lastFolder)
+			return &lastFolder, ""
+		}
+	}
+	return nil, "no more data"
 }
